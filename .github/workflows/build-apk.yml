@@ -39,10 +39,13 @@ jobs:
       - name: Keystore + signing props
         run: |
           mkdir -p client/TMessagesProj/config
+          # в репо DrKLO уже лежит demo-keystore с паролем "android" — убираем
+          rm -f client/TMessagesProj/config/release.keystore
           keytool -genkeypair -v -keystore client/TMessagesProj/config/release.keystore \
             -alias owpengram -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass owpengram2026 -keypass owpengram2026 \
             -dname "CN=OwpenGram, OU=Dev, O=OwpenGram, L=NA, S=NA, C=RU"
+          ls -l client/TMessagesProj/config/release.keystore
           # RELEASE_* читаются как project properties из корневого gradle.properties
           python3 - <<'PY'
           import pathlib, re
