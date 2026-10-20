@@ -1,0 +1,79 @@
+name: build-apk
+
+on:
+  push:
+    branches: [main]
+    paths: ['patch_client.py', '.github/workflows/build-apk.yml']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout build repo
+        uses: actions/checkout@v4
+
+      - name: Clone DrKLO Telegram 13.0.3
+        run: |
+          git clone --depth 1 --recursive https://github.com/DrKLO/Telegram.git client
+          cd client
+          git log --oneline -1
+          grep APP_VERSION_NAME gradle.properties
+
+      - name: Patch client for our server
+        run: |
+          python3 patch_client.py client
+          echo "=== verify ==="
+          grep -c '144.31.167.136' client/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
+          grep -c 'a228111f83e5be80\|0xa228111f83e5be80' client/TMessagesProj/jni/tgnet/Handshake.cpp
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup NDK
+        run: |
+          echo "y" | sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
+          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
+
+      - name: Generate keystore
+        run: |
+          keytool -genkeypair -v -keystore release.keystore -alias owpengram \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass owpengram2026 -keypass owpengram2026 \
+            -dname "CN=OwpenGram, OU=Dev, O=OwpenGram, L=NA, S=NA, C=RU"
+
+      - name: Configure signing
+        run: |
+          cd client
+          cat >> gradle.properties <<'EOF'
+          APP_RELEASE_STORE_FILE=../release.keystore
+          APP_RELEASE_STORE_PASSWORD=owpengram2026
+          APP_RELEASE_KEY_ALIAS=owpengram
+          APP_RELEASE_KEY_PASSWORD=owpengram2026
+          EOF
+
+      - name: Build release APK
+        run: |
+          cd client
+          chmod +x gradlew
+          ./gradlew TMessagesProj:assembleRelease --no-daemon -x lint 2>&1 | tail -40
+
+      - name: Locate APK
+        run: |
+          find client -name "*.apk" -type f | head -20
+          mkdir -p out
+          find client -name "*-release*.apk" -type f -exec cp {} out/owpengram.apk \;
+          ls -lh out/
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: owpengram-apk
+          path: out/*.apk
+          retention-days: 7
