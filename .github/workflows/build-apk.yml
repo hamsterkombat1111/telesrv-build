@@ -13,25 +13,22 @@ jobs:
       - name: Checkout build repo
         uses: actions/checkout@v4
 
-      - name: Clone DrKLO Telegram 13.0.3
+      - name: Clone DrKLO Telegram
         run: |
           git clone --depth 1 https://github.com/DrKLO/Telegram.git client
           cd client
-          git submodule update --init --depth 1 --recursive 2>&1 | tail -5 || \
-            git submodule update --init --depth 1 --recursive 2>&1 | tail -5
+          git submodule update --init --depth 1 --recursive 2>&1 | tail -3 || \
+            git submodule update --init --depth 1 --recursive 2>&1 | tail -3
           git log --oneline -1
           grep APP_VERSION_NAME gradle.properties
 
       - name: Patch client for our server
         run: |
           python3 patch_client.py client
-          echo "=== verify ==="
           echo -n "our IP count: "
           grep -c '144.31.167.136' client/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
           echo -n "our fingerprint count: "
           grep -c 'a228111f83e5be80' client/TMessagesProj/jni/tgnet/Handshake.cpp
-          echo -n "old TG IPs left: "
-          grep -c '149\.154\.' client/TMessagesProj/jni/tgnet/ConnectionsManager.cpp || true
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -39,46 +36,39 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Show preinstalled SDK/NDK
+      - name: Keystore + local.properties
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          ls $ANDROID_HOME/ndk/ 2>/dev/null || echo "no ndk dir"
-          ls $ANDROID_HOME/cmake/ 2>/dev/null || echo "no cmake dir"
-
-      - name: Generate keystore
-        run: |
-          keytool -genkeypair -v -keystore release.keystore -alias owpengram \
-            -keyalg RSA -keysize 2048 -validity 10000 \
+          mkdir -p client/TMessagesProj/config
+          keytool -genkeypair -v -keystore client/TMessagesProj/config/release.keystore \
+            -alias owpengram -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass owpengram2026 -keypass owpengram2026 \
             -dname "CN=OwpenGram, OU=Dev, O=OwpenGram, L=NA, S=NA, C=RU"
-
-      - name: Configure signing
-        run: |
-          cd client
-          cat >> gradle.properties <<'EOF'
-          APP_RELEASE_STORE_FILE=../release.keystore
-          APP_RELEASE_STORE_PASSWORD=owpengram2026
-          APP_RELEASE_KEY_ALIAS=owpengram
-          APP_RELEASE_KEY_PASSWORD=owpengram2026
+          cat > client/local.properties <<'EOF'
+          sdk.dir=/usr/local/lib/android/sdk
+          RELEASE_STORE_PASSWORD=owpengram2026
+          RELEASE_KEY_ALIAS=owpengram
+          RELEASE_KEY_PASSWORD=owpengram2026
           EOF
+          cat client/local.properties
 
-      - name: Build release APK
+      - name: Build release APK (App module)
         run: |
           cd client
           chmod +x gradlew
-          ./gradlew TMessagesProj:assembleRelease --no-daemon -x lint 2>&1 | tail -60
+          ./gradlew :TMessagesProj_App:assembleRelease --no-daemon -x lint 2>&1 | tail -50
 
-      - name: Locate APK
+      - name: Locate + rename APK
         run: |
-          find client -name "*.apk" -type f | head -20
           mkdir -p out
-          find client -name "*-release*.apk" -type f -exec cp {} out/owpengram.apk \;
-          ls -lh out/ || true
+          echo "=== all apks: ==="
+          find client -name "*.apk" -type f | head -20
+          find client/TMessagesProj_App/build/outputs/apk -name "*.apk" -type f -exec cp {} out/owpengram.apk \;
+          ls -lh out/
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: owpengram-apk
           path: out/*.apk
+          if-no-files-found: error
           retention-days: 7
