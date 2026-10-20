@@ -15,8 +15,11 @@ jobs:
 
       - name: Clone DrKLO Telegram 13.0.3
         run: |
-          git clone --depth 1 --recursive https://github.com/DrKLO/Telegram.git client
+          git clone --depth 1 https://github.com/DrKLO/Telegram.git client
           cd client
+          # сабмодули отдельно, с ретраями: chromium.googlesource часто отдаёт 503
+          git submodule update --init --depth 1 --recursive 2>&1 | tail -5 || \
+            git submodule update --init --depth 1 --recursive 2>&1 | tail -5
           git log --oneline -1
           grep APP_VERSION_NAME gradle.properties
 
