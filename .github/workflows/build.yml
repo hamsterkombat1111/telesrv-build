@@ -1,0 +1,48 @@
+name: build-telesrv
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout upstream
+        run: |
+          git clone --depth 1 https://github.com/iamxvbaba/gramsrv.git src
+          cd src && git log --oneline -1
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+          cache: false
+
+      - name: Build telesrv
+        run: |
+          cd src
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o ../telesrv ./cmd/telesrv
+
+      - name: Build telesrv-admin
+        run: |
+          cd src
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags="-s -w" -o ../telesrv-admin ./cmd/telesrv-admin
+
+      - name: Info
+        run: |
+          ls -lh telesrv telesrv-admin
+          sha256sum telesrv telesrv-admin
+          file telesrv
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: telesrv-linux-amd64
+          path: |
+            telesrv
+            telesrv-admin
+          retention-days: 7
