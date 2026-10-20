@@ -36,20 +36,25 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Keystore + local.properties
+      - name: Keystore + signing props
         run: |
           mkdir -p client/TMessagesProj/config
           keytool -genkeypair -v -keystore client/TMessagesProj/config/release.keystore \
             -alias owpengram -keyalg RSA -keysize 2048 -validity 10000 \
             -storepass owpengram2026 -keypass owpengram2026 \
             -dname "CN=OwpenGram, OU=Dev, O=OwpenGram, L=NA, S=NA, C=RU"
-          cat > client/local.properties <<'EOF'
-          sdk.dir=/usr/local/lib/android/sdk
-          RELEASE_STORE_PASSWORD=owpengram2026
-          RELEASE_KEY_ALIAS=owpengram
-          RELEASE_KEY_PASSWORD=owpengram2026
-          EOF
-          cat client/local.properties
+          # RELEASE_* читаются как project properties из корневого gradle.properties
+          python3 - <<'PY'
+          import pathlib, re
+          p = pathlib.Path("client/gradle.properties")
+          txt = p.read_text()
+          txt = re.sub(r'^RELEASE_KEY_ALIAS=.*$', 'RELEASE_KEY_ALIAS=owpengram', txt, flags=re.M)
+          txt = re.sub(r'^RELEASE_KEY_PASSWORD=.*$', 'RELEASE_KEY_PASSWORD=owpengram2026', txt, flags=re.M)
+          txt = re.sub(r'^RELEASE_STORE_PASSWORD=.*$', 'RELEASE_STORE_PASSWORD=owpengram2026', txt, flags=re.M)
+          p.write_text(txt)
+          print("\n".join(l for l in txt.splitlines() if l.startswith("RELEASE_")))
+          PY
+          echo "sdk.dir=/usr/local/lib/android/sdk" > client/local.properties
 
       - name: Build release APK (App module)
         run: |
