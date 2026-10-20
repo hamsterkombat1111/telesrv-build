@@ -17,7 +17,6 @@ jobs:
         run: |
           git clone --depth 1 https://github.com/DrKLO/Telegram.git client
           cd client
-          # сабмодули отдельно, с ретраями: chromium.googlesource часто отдаёт 503
           git submodule update --init --depth 1 --recursive 2>&1 | tail -5 || \
             git submodule update --init --depth 1 --recursive 2>&1 | tail -5
           git log --oneline -1
@@ -27,8 +26,12 @@ jobs:
         run: |
           python3 patch_client.py client
           echo "=== verify ==="
+          echo -n "our IP count: "
           grep -c '144.31.167.136' client/TMessagesProj/jni/tgnet/ConnectionsManager.cpp
-          grep -c 'a228111f83e5be80\|0xa228111f83e5be80' client/TMessagesProj/jni/tgnet/Handshake.cpp
+          echo -n "our fingerprint count: "
+          grep -c 'a228111f83e5be80' client/TMessagesProj/jni/tgnet/Handshake.cpp
+          echo -n "old TG IPs left: "
+          grep -c '149\.154\.' client/TMessagesProj/jni/tgnet/ConnectionsManager.cpp || true
 
       - name: Setup JDK 17
         uses: actions/setup-java@v4
@@ -36,13 +39,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup NDK
+      - name: Show preinstalled SDK/NDK
         run: |
-          echo "y" | sdkmanager --install "ndk;27.2.12479018" "cmake;3.22.1"
-          echo "ANDROID_NDK=$ANDROID_SDK_ROOT/ndk/27.2.12479018" >> $GITHUB_ENV
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          ls $ANDROID_HOME/ndk/ 2>/dev/null || echo "no ndk dir"
+          ls $ANDROID_HOME/cmake/ 2>/dev/null || echo "no cmake dir"
 
       - name: Generate keystore
         run: |
@@ -65,14 +67,14 @@ jobs:
         run: |
           cd client
           chmod +x gradlew
-          ./gradlew TMessagesProj:assembleRelease --no-daemon -x lint 2>&1 | tail -40
+          ./gradlew TMessagesProj:assembleRelease --no-daemon -x lint 2>&1 | tail -60
 
       - name: Locate APK
         run: |
           find client -name "*.apk" -type f | head -20
           mkdir -p out
           find client -name "*-release*.apk" -type f -exec cp {} out/owpengram.apk \;
-          ls -lh out/
+          ls -lh out/ || true
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
