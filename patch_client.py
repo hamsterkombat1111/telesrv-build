@@ -82,6 +82,38 @@ def patch(root: pathlib.Path) -> list[str]:
             changed.append(str(bv))
             print("BuildVars APP_ID/APP_HASH patched")
 
+    # 4) Package name: com.zalypaebanaia.tg
+    #
+    # APP_PACKAGE drives applicationId for every variant (see
+    # TMessagesProj_App/build.gradle: defaultConfig.applicationId = APP_PACKAGE).
+    # The namespace stays org.telegram.messenger, so R/BuildConfig references in
+    # the Java sources keep resolving -- only the installed identity changes.
+    gp = root / "gradle.properties"
+    if gp.exists():
+        src = orig = _read(gp)
+        src = re.sub(r'^APP_PACKAGE=.*$', 'APP_PACKAGE=com.zalypaebanaia.tg', src, flags=re.M)
+        if src != orig:
+            _write(gp, src)
+            changed.append(str(gp))
+            print("APP_PACKAGE patched -> com.zalypaebanaia.tg")
+
+    # 5) wallet_available must default to true, not BuildVars.DEBUG_VERSION.
+    #
+    # Release builds set DEBUG_VERSION=false, so the wallet gate defaulted to
+    # false and no client ever rendered the Send money entry point unless the
+    # server config happened to arrive first. Forcing the default makes the
+    # wallet reachable on a clean install; a server-sent value still overrides it.
+    agc = root / "TMessagesProj/src/main/java/org/telegram/messenger/AppGlobalConfig.java"
+    if agc.exists():
+        src = orig = _read(agc)
+        src = re.sub(
+            r'ofBoolean\("wallet_available",\s*BuildVars\.DEBUG_VERSION\)',
+            'ofBoolean("wallet_available", true)', src)
+        if src != orig:
+            _write(agc, src)
+            changed.append(str(agc))
+            print("wallet_available default -> true")
+
     return changed
 
 
