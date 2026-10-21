@@ -97,7 +97,34 @@ def patch(root: pathlib.Path) -> list[str]:
             changed.append(str(gp))
             print("APP_PACKAGE patched -> com.zalypaebanaia.tg")
 
-    # 5) wallet_available must default to true, not BuildVars.DEBUG_VERSION.
+    # 5) google-services.json must know our applicationId.
+    #
+    # TMessagesProj_App applies the google-services plugin, which fails the build
+    # with "No matching client found for package name" unless the package is
+    # listed. The Firebase app id is copied from the existing release entry: this
+    # build does not use FCM, it only has to satisfy the plugin.
+    gs = root / "TMessagesProj_App/google-services.json"
+    if gs.exists():
+        import json
+        data = json.loads(_read(gs))
+        want = "com.zalypaebanaia.tg"
+        clients = data.get("client", [])
+        present = {c.get("client_info", {}).get("android_client_info", {}).get("package_name")
+                   for c in clients}
+        if want not in present and clients:
+            template = next((c for c in clients
+                             if c.get("client_info", {}).get("android_client_info", {})
+                             .get("package_name") == "org.telegram.messenger"), clients[0])
+            entry = json.loads(json.dumps(template))
+            entry["client_info"]["android_client_info"]["package_name"] = want
+            entry["client_info"]["mobilesdk_app_id"] = "1:760348033671:android:zalypaebanaia"
+            clients.append(entry)
+            data["client"] = clients
+            _write(gs, json.dumps(data, indent=2))
+            changed.append(str(gs))
+            print("google-services.json: added", want)
+
+    # 6) wallet_available must default to true, not BuildVars.DEBUG_VERSION.
     #
     # Release builds set DEBUG_VERSION=false, so the wallet gate defaulted to
     # false and no client ever rendered the Send money entry point unless the
