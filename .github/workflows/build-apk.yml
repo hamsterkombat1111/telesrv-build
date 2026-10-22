@@ -36,6 +36,20 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Кэш Gradle и NDK: без него каждая сборка тянет зависимости и собирает
+      # нативный код с нуля (~12 минут). С кэшем повторная сборка заметно короче.
+      - name: Cache Gradle and NDK
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            client/TMessagesProj/.cxx
+            client/TMessagesProj/build
+          key: gradle-${{ runner.os }}-${{ hashFiles('client/TMessagesProj/build.gradle', 'client/gradle.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Keystore + signing props
         run: |
           mkdir -p client/TMessagesProj/config

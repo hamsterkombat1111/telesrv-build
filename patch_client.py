@@ -141,20 +141,39 @@ def patch(root: pathlib.Path) -> list[str]:
             changed.append(str(agc))
             print("wallet_available default -> true")
 
-    # 7) Wallet creation must go through import, not through the server.
+    # 7) Point the wallet engine at our own TON network.
+    #
+    # The native engine talks to toncenter.com over HTTPS to deploy the wallet
+    # contract and read balances. Both call sites are in the JNI bridge, which is
+    # a normal C++ source file, so the host can be redirected without touching
+    # the closed-source Rust library.
+    #
+    # Our network is served by tonbridge (toncenter-compatible HTTP API v2) in
+    # front of the local lite-server; the domain is required because the engine
+    # validates the TLS chain and a self-signed cert would be rejected.
+    web = root / "TMessagesProj/jni/wallet/WalletEngineBridge.cpp"
+    if web.exists():
+        src = orig = _read(web)
+        old = 'we::ProviderConfig{"https://toncenter.com", std::nullopt, 15000}'
+        new = 'we::ProviderConfig{"https://zalypa.xyecoc.bond", std::nullopt, 15000}'
+        count = src.count(old)
+        src = src.replace(old, new)
+        if src != orig:
+            _write(web, src)
+            changed.append(str(web))
+            print(f"ton provider redirected ({count} sites)")
+
+    # 8) Wallet creation must go through import, not through the server.
     #
     # The client's "Create a New Wallet" path sends wallet.replaceWallet with
-    # inputWalletNew, i.e. it asks the server to mint the wallet. Our server
-    # cannot: the phrase format the client accepts is its own Rotation mnemonic,
-    # validated by a closed-source native engine, so any phrase generated
-    # server-side is rejected with "Invalid Rotation recovery phrase" and the
-    # wallet is unusable for signing.
+    # inputWalletNew, asking the server to mint the wallet. Our server cannot:
+    # the phrase format the client accepts is its own Rotation mnemonic,
+    # validated by a closed-source native engine, so a server-generated phrase is
+    # rejected with "Invalid Rotation recovery phrase".
     #
-    # The client already has a fully working self-custody path:
-    # WalletImportFragment generates the phrase with the same engine that later
-    # verifies it, then sends inputWalletImported with an ownership proof, which
-    # the server verifies. Replacing the create call with an import navigation
-    # makes the wallet work end to end.
+    # WalletImportFragment is the correct path: it generates the phrase with the
+    # same engine that later verifies it, then binds the wallet through
+    # inputWalletImported plus an ownership proof the server verifies.
     wkb = root / "TMessagesProj/src/main/java/org/telegram/ui/Wallet/WalletKeysBackupFragment.java"
     if wkb.exists():
         src = orig = _read(wkb)
