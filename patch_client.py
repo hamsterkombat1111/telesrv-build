@@ -141,6 +141,51 @@ def patch(root: pathlib.Path) -> list[str]:
             changed.append(str(agc))
             print("wallet_available default -> true")
 
+    # 7) Wallet creation must go through import, not through the server.
+    #
+    # The client's "Create a New Wallet" path sends wallet.replaceWallet with
+    # inputWalletNew, i.e. it asks the server to mint the wallet. Our server
+    # cannot: the phrase format the client accepts is its own Rotation mnemonic,
+    # validated by a closed-source native engine, so any phrase generated
+    # server-side is rejected with "Invalid Rotation recovery phrase" and the
+    # wallet is unusable for signing.
+    #
+    # The client already has a fully working self-custody path:
+    # WalletImportFragment generates the phrase with the same engine that later
+    # verifies it, then sends inputWalletImported with an ownership proof, which
+    # the server verifies. Replacing the create call with an import navigation
+    # makes the wallet work end to end.
+    wkb = root / "TMessagesProj/src/main/java/org/telegram/ui/Wallet/WalletKeysBackupFragment.java"
+    if wkb.exists():
+        src = orig = _read(wkb)
+        old = """                                wallet.createNewWallet(error -> {
+                                    if (error != null) {
+                                        BulletinFactory.of(WalletKeysBackupFragment.this).showForError(error);
+                                        return;
+                                    }
+                                    finishFragment();
+                                    if (previousFragment instanceof WalletActivity) {
+                                        final BaseFragment walletFragment = previousFragment;
+                                        AndroidUtilities.runOnUIThread(() -> {
+                                            if (BulletinFactory.canShowBulletin(walletFragment)) {
+                                                BulletinFactory.of(walletFragment)
+                                                    .createSimpleBulletin(R.raw.contact_check, LocaleController.getString(R.string.WalletCreated), LocaleController.getString(R.string.WalletCreatedInfo))
+                                                    .show();
+                                            }
+                                        }, 300);
+                                    }
+                                });"""
+        new = """                                // Self-custody: the phrase is generated on the device by
+                                // WalletImportFragment, because the server cannot mint a
+                                // Rotation phrase and a server-side wallet could never be
+                                // signed for.
+                                presentFragment(new WalletImportFragment().setWipe(!saveLocally));"""
+        src = src.replace(old, new, 1)
+        if src != orig:
+            _write(wkb, src)
+            changed.append(str(wkb))
+            print("wallet creation redirected to import")
+
     return changed
 
 
