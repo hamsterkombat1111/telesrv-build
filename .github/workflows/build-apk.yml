@@ -6,6 +6,21 @@ on:
     paths: ['patch_client.py', '.github/workflows/build-apk.yml']
   workflow_dispatch:
 
+env:
+  # ccache: NDK компилирует ~1000 C++ файлов в libtmessages.so — это главный
+  # пожиратель времени (33 минуты холодной сборки). ccache переиспользует
+  # объектники между прогонами.
+  CCACHE_DIR: /home/runner/.ccache
+  CCACHE_MAXSIZE: 2G
+  # base_dir нормализует абсолютные пути: чек-аут каждый раз в новый каталог,
+  # без этого хэши не совпадут никогда.
+  CCACHE_BASEDIR: /home/runner/work
+  # time_macros: NDK подставляет __DATE__/__TIME__ в часть файлов, без этого
+  # кэш всегда мимо.
+  CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+  CCACHE_COMPILERCHECK: content
+  CCACHE_NOHASHDIR: "true"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -36,19 +51,66 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      # Кэш Gradle и NDK: без него каждая сборка тянет зависимости и собирает
-      # нативный код с нуля (~12 минут). С кэшем повторная сборка заметно короче.
-      - name: Cache Gradle and NDK
+      # ccache обязан стоять до вызова gradle: путь к бинарю уходит в CMake.
+      - name: Install and configure ccache
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ccache
+          ccache --version | head -1
+          ccache --max-size=2G
+          echo "ccache: $(which ccache)"
+
+      # AGP передаёт `arguments` из externalNativeBuild прямо в CMake, а CMake
+      # официально поддерживает *_COMPILER_LAUNCHER. Это надёжнее, чем env-var
+      # ANDROID_NDK_CCACHE (его поддержку в AGP 8 никто не гарантирует).
+      - name: Wire ccache into CMake
+        run: |
+          python3 - <<'PY'
+          import pathlib, sys
+          p = pathlib.Path("client/TMessagesProj/build.gradle")
+          s = p.read_text()
+          old = "arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21'"
+          new = ("arguments '-DANDROID_STL=c++_static', '-DANDROID_PLATFORM=android-21', "
+                 "'-DCMAKE_C_COMPILER_LAUNCHER=ccache', "
+                 "'-DCMAKE_CXX_COMPILER_LAUNCHER=ccache'")
+          if old not in s:
+              sys.exit("FATAL: arguments line not found in build.gradle")
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          print("ccache launcher added to CMake arguments")
+          PY
+          grep -n "COMPILER_LAUNCHER" client/TMessagesProj/build.gradle
+
+      # Кэш rolling: ключ содержит run_id, поэтому каждая успешная сборка
+      # перезаписывает кэш свежими объектниками. Со статичным ключом это
+      # невозможно — actions/cache иммутабелен: запись создаётся один раз и
+      # больше не обновляется, так что кэш навсегда остался бы от первой сборки.
+      - name: Restore build caches
+        id: cache
         uses: actions/cache@v4
         with:
           path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
+            /home/runner/.ccache
+            /home/runner/.gradle/caches
+            /home/runner/.gradle/wrapper
             client/TMessagesProj/.cxx
-            client/TMessagesProj/build
-          key: gradle-${{ runner.os }}-${{ hashFiles('client/TMessagesProj/build.gradle', 'client/gradle.properties') }}
+          key: build-v3-${{ runner.os }}-${{ github.run_id }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            build-v3-${{ runner.os }}-
+
+      - name: Cache stats before build
+        run: |
+          echo "exact hit: ${{ steps.cache.outputs.cache-hit }}"
+          ccache -s || true
+          du -sh "$CCACHE_DIR" 2>/dev/null || echo "ccache dir empty"
+
+      # org.gradle.caching=true включает build cache задач, а не только
+      # зависимостей: повторные прогоны переиспользуют вывод Java/R8.
+      - name: Enable Gradle build cache
+        run: |
+          grep -q '^org.gradle.caching=' client/gradle.properties \
+            || echo 'org.gradle.caching=true' >> client/gradle.properties
+          grep -E '^org.gradle.(caching|parallel|jvmargs)' client/gradle.properties
 
       - name: Keystore + signing props
         run: |
@@ -77,7 +139,14 @@ jobs:
         run: |
           cd client
           chmod +x gradlew
-          ./gradlew :TMessagesProj_App:assembleRelease --no-daemon -x lint 2>&1 | tail -50
+          time ./gradlew :TMessagesProj_App:assembleRelease --no-daemon -x lint 2>&1 | tail -50
+
+      # Проверка, что ccache реально работал: hit rate > 0 на повторной сборке.
+      - name: ccache stats after build
+        if: always()
+        run: |
+          ccache -s || true
+          du -sh "$CCACHE_DIR" 2>/dev/null || true
 
       - name: Locate + rename APK
         run: |
@@ -94,3 +163,7 @@ jobs:
           path: out/*.apk
           if-no-files-found: error
           retention-days: 7
+
+      # Кэш сохраняет пост-шаг actions/cache (ключ с run_id — каждый прогон
+      # свежая запись). Лимит репозитория 10 ГБ: ~2.5 ГБ Gradle + ~2 ГБ ccache,
+      # старые записи вытесняются LRU автоматически.
