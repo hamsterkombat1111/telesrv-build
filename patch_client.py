@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Патч DrKLO Telegram под свой сервер: DC-адреса, RSA-ключ, fingerprint, APP_ID/HASH."""
+"""Патч DrKLO Telegram под свой сервер: DC-адреса, RSA-ключ, fingerprint, APP_ID/HASH, кошелёк."""
 import pathlib
 import re
 import sys
@@ -83,11 +83,6 @@ def patch(root: pathlib.Path) -> list[str]:
             print("BuildVars APP_ID/APP_HASH patched")
 
     # 4) Package name: com.zalypaebanaia.tg
-    #
-    # APP_PACKAGE drives applicationId for every variant (see
-    # TMessagesProj_App/build.gradle: defaultConfig.applicationId = APP_PACKAGE).
-    # The namespace stays org.telegram.messenger, so R/BuildConfig references in
-    # the Java sources keep resolving -- only the installed identity changes.
     gp = root / "gradle.properties"
     if gp.exists():
         src = orig = _read(gp)
@@ -98,11 +93,6 @@ def patch(root: pathlib.Path) -> list[str]:
             print("APP_PACKAGE patched -> com.zalypaebanaia.tg")
 
     # 5) google-services.json must know our applicationId.
-    #
-    # TMessagesProj_App applies the google-services plugin, which fails the build
-    # with "No matching client found for package name" unless the package is
-    # listed. The Firebase app id is copied from the existing release entry: this
-    # build does not use FCM, it only has to satisfy the plugin.
     gs = root / "TMessagesProj_App/google-services.json"
     if gs.exists():
         import json
@@ -125,11 +115,6 @@ def patch(root: pathlib.Path) -> list[str]:
             print("google-services.json: added", want)
 
     # 6) wallet_available must default to true, not BuildVars.DEBUG_VERSION.
-    #
-    # Release builds set DEBUG_VERSION=false, so the wallet gate defaulted to
-    # false and no client ever rendered the Send money entry point unless the
-    # server config happened to arrive first. Forcing the default makes the
-    # wallet reachable on a clean install; a server-sent value still overrides it.
     agc = root / "TMessagesProj/src/main/java/org/telegram/messenger/AppGlobalConfig.java"
     if agc.exists():
         src = orig = _read(agc)
@@ -142,15 +127,6 @@ def patch(root: pathlib.Path) -> list[str]:
             print("wallet_available default -> true")
 
     # 7) Point the wallet engine at our own TON network.
-    #
-    # The native engine talks to toncenter.com over HTTPS to deploy the wallet
-    # contract and read balances. Both call sites are in the JNI bridge, which is
-    # a normal C++ source file, so the host can be redirected without touching
-    # the closed-source Rust library.
-    #
-    # Our network is served by tonbridge (toncenter-compatible HTTP API v2) in
-    # front of the local lite-server; the domain is required because the engine
-    # validates the TLS chain and a self-signed cert would be rejected.
     web = root / "TMessagesProj/jni/wallet/WalletEngineBridge.cpp"
     if web.exists():
         src = orig = _read(web)
@@ -163,47 +139,107 @@ def patch(root: pathlib.Path) -> list[str]:
             changed.append(str(web))
             print(f"ton provider redirected ({count} sites)")
 
-    # 8) Wallet creation must go through import, not through the server.
-    #
-    # The client's "Create a New Wallet" path sends wallet.replaceWallet with
-    # inputWalletNew, asking the server to mint the wallet. Our server cannot:
-    # the phrase format the client accepts is its own Rotation mnemonic,
-    # validated by a closed-source native engine, so a server-generated phrase is
-    # rejected with "Invalid Rotation recovery phrase".
-    #
-    # WalletImportFragment is the correct path: it generates the phrase with the
-    # same engine that later verifies it, then binds the wallet through
-    # inputWalletImported plus an ownership proof the server verifies.
+    # 8) Safe storage.wipe in WalletKeysBackupFragment (prevent NPE when wallet.storage is null)
     wkb = root / "TMessagesProj/src/main/java/org/telegram/ui/Wallet/WalletKeysBackupFragment.java"
     if wkb.exists():
         src = orig = _read(wkb)
-        old = """                                wallet.createNewWallet(error -> {
-                                    if (error != null) {
-                                        BulletinFactory.of(WalletKeysBackupFragment.this).showForError(error);
-                                        return;
-                                    }
-                                    finishFragment();
-                                    if (previousFragment instanceof WalletActivity) {
-                                        final BaseFragment walletFragment = previousFragment;
-                                        AndroidUtilities.runOnUIThread(() -> {
-                                            if (BulletinFactory.canShowBulletin(walletFragment)) {
-                                                BulletinFactory.of(walletFragment)
-                                                    .createSimpleBulletin(R.raw.contact_check, LocaleController.getString(R.string.WalletCreated), LocaleController.getString(R.string.WalletCreatedInfo))
-                                                    .show();
-                                            }
-                                        }, 300);
-                                    }
-                                });"""
-        new = """                                // Self-custody: the phrase is generated on the device by
-                                // WalletImportFragment, because the server cannot mint a
-                                // Rotation phrase and a server-side wallet could never be
-                                // signed for.
-                                presentFragment(new WalletImportFragment().setWipe(!saveLocally));"""
-        src = src.replace(old, new, 1)
+        old_wipe = """                                if (!saveLocally) {
+                                    wallet.storage.wipe();
+                                }"""
+        new_wipe = """                                if (!saveLocally && wallet.storage != null) {
+                                    wallet.storage.wipe();
+                                }"""
+        src = src.replace(old_wipe, new_wipe, 1)
         if src != orig:
             _write(wkb, src)
             changed.append(str(wkb))
-            print("wallet creation redirected to import")
+            print("WalletKeysBackupFragment storage wipe NPE guarded")
+
+    # 9) Auto-provision wallet on empty state & ensure challenge before createNewWallet
+    gw = root / "TMessagesProj/src/main/java/org/telegram/ui/Wallet/GramWallet.java"
+    if gw.exists():
+        src = orig = _read(gw)
+
+        # 9a) When server returns TL_walletStateEmpty, trigger auto-creation
+        old_rs = """        requestingStateId = getConnectionsManager().sendRequestTyped(new TL_wallet.getState(), AndroidUtilities::runOnUIThread, (state, err) -> {
+            requestingStateId = -1;
+            if (state == null) {
+                err("requesting gasless info: " + (err != null ? err.text : "NULL_ERROR"));
+                return;
+            }"""
+        new_rs = """        requestingStateId = getConnectionsManager().sendRequestTyped(new TL_wallet.getState(), AndroidUtilities::runOnUIThread, (state, err) -> {
+            requestingStateId = -1;
+            if (state == null) {
+                err("requesting gasless info: " + (err != null ? err.text : "NULL_ERROR"));
+                return;
+            }
+            if (state instanceof TL_wallet.TL_walletStateEmpty) {
+                this.state = state;
+                onStateUpdate();
+                notifyUpdate();
+                createNewWallet(null);
+                return;
+            }"""
+        src = src.replace(old_rs, new_rs, 1)
+
+        # 9b) Request proof challenge before replaceWallet so server validates creation
+        old_cnw = """    public void createNewWallet(Utilities.Callback<String> whenDone) {
+        PasswordRequest.open(currentAccount, password -> {
+            final TL_wallet.replaceWallet req = new TL_wallet.replaceWallet();
+            req.wallet = new TL_wallet.inputWalletNew();
+            req.password = password;
+            return req;
+        }, (state, error, password) -> {
+            if (error != null) {
+                whenDone.run(error.text == null ? "NULL_ERROR" : error.text);
+                return;
+            }
+            updateState(state);
+            onWalletChanged();
+            whenDone.run(null);
+        });
+    }"""
+        new_cnw = """    public void createNewWallet(Utilities.Callback<String> whenDone) {
+        getConnectionsManager().sendRequestTyped(new TL_wallet.getProofChallenge(), AndroidUtilities::runOnUIThread, (challenge, chErr) -> {
+            PasswordRequest.open(currentAccount, password -> {
+                final TL_wallet.replaceWallet req = new TL_wallet.replaceWallet();
+                req.wallet = new TL_wallet.inputWalletNew();
+                req.password = password;
+                return req;
+            }, (state, error, password) -> {
+                if (error != null) {
+                    if (whenDone != null) whenDone.run(error.text == null ? "NULL_ERROR" : error.text);
+                    return;
+                }
+                updateState(state);
+                onWalletChanged();
+                if (whenDone != null) whenDone.run(null);
+            });
+        });
+    }"""
+        src = src.replace(old_cnw, new_cnw, 1)
+
+        if src != orig:
+            _write(gw, src)
+            changed.append(str(gw))
+            print("GramWallet auto-provision & proof challenge wired")
+
+    # 10) WalletActivity auto-trigger create if not ready & empty state
+    wa = root / "TMessagesProj/src/main/java/org/telegram/ui/Wallet/WalletActivity.java"
+    if wa.exists():
+        src = orig = _read(wa)
+        old_wa = """        if (!wallet.isReady()) {
+            balanceView.setText(loading(0));"""
+        new_wa = """        if (!wallet.isReady()) {
+            if (wallet.getState() instanceof TL_wallet.TL_walletStateEmpty) {
+                wallet.createNewWallet(null);
+            }
+            balanceView.setText(loading(0));"""
+        src = src.replace(old_wa, new_wa, 1)
+        if src != orig:
+            _write(wa, src)
+            changed.append(str(wa))
+            print("WalletActivity auto-trigger create wired")
 
     return changed
 
