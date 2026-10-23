@@ -210,7 +210,7 @@ def patch(root: pathlib.Path) -> list[str]:
         });
     }"""
         new_cnw = """    public static SecretPhrase generateMnemonic12() {
-        String[] words = WalletEngine2.mnemonicWordlist();
+        String[] words = WalletEngine2.getMnemonicWordlist();
         if (words == null || words.length < 2048) {
             return null;
         }
