@@ -224,23 +224,6 @@ def patch(root: pathlib.Path) -> list[str]:
             changed.append(str(gw))
             print("GramWallet auto-provision & proof challenge wired")
 
-    # 10) WalletActivity auto-trigger create if not ready & empty state
-    wa = root / "TMessagesProj/src/main/java/org/telegram/ui/Wallet/WalletActivity.java"
-    if wa.exists():
-        src = orig = _read(wa)
-        old_wa = """        if (!wallet.isReady()) {
-            balanceView.setText(loading(0));"""
-        new_wa = """        if (!wallet.isReady()) {
-            if (wallet.getState() instanceof TL_wallet.TL_walletStateEmpty) {
-                wallet.createNewWallet(null);
-            }
-            balanceView.setText(loading(0));"""
-        src = src.replace(old_wa, new_wa, 1)
-        if src != orig:
-            _write(wa, src)
-            changed.append(str(wa))
-            print("WalletActivity auto-trigger create wired")
-
     return changed
 
 
