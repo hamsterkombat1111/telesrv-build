@@ -160,7 +160,7 @@ def patch(root: pathlib.Path) -> list[str]:
     if gw.exists():
         src = orig = _read(gw)
 
-        # 9a) When server returns TL_walletStateEmpty, trigger auto-creation
+        # 9a) When server returns TL_walletStateEmpty or state has no local backup, trigger auto-creation
         old_rs = """        requestingStateId = getConnectionsManager().sendRequestTyped(new TL_wallet.getState(), AndroidUtilities::runOnUIThread, (state, err) -> {
             requestingStateId = -1;
             if (state == null) {
@@ -179,10 +179,20 @@ def patch(root: pathlib.Path) -> list[str]:
                 notifyUpdate();
                 createNewWallet(null);
                 return;
+            }
+            if (state instanceof TL_wallet.TL_walletState) {
+                final TL_wallet.TL_walletState ws = (TL_wallet.TL_walletState) state;
+                if (storage == null || !storage.containsSecretPhrase(ws.public_key)) {
+                    this.state = state;
+                    onStateUpdate();
+                    notifyUpdate();
+                    createNewWallet(null);
+                    return;
+                }
             }"""
         src = src.replace(old_rs, new_rs, 1)
 
-        # 9b) Request proof challenge before replaceWallet so server validates creation
+        # 9b) Auto-generate 12-word BIP-39 mnemonic and import wallet locally
         old_cnw = """    public void createNewWallet(Utilities.Callback<String> whenDone) {
         PasswordRequest.open(currentAccount, password -> {
             final TL_wallet.replaceWallet req = new TL_wallet.replaceWallet();
@@ -199,23 +209,43 @@ def patch(root: pathlib.Path) -> list[str]:
             whenDone.run(null);
         });
     }"""
-        new_cnw = """    public void createNewWallet(Utilities.Callback<String> whenDone) {
-        getConnectionsManager().sendRequestTyped(new TL_wallet.getProofChallenge(), AndroidUtilities::runOnUIThread, (challenge, chErr) -> {
-            PasswordRequest.open(currentAccount, password -> {
-                final TL_wallet.replaceWallet req = new TL_wallet.replaceWallet();
-                req.wallet = new TL_wallet.inputWalletNew();
-                req.password = password;
-                return req;
-            }, (state, error, password) -> {
-                if (error != null) {
-                    if (whenDone != null) whenDone.run(error.text == null ? "NULL_ERROR" : error.text);
-                    return;
+        new_cnw = """    public static SecretPhrase generateMnemonic12() {
+        String[] words = WalletEngine2.mnemonicWordlist();
+        if (words == null || words.length < 2048) {
+            return null;
+        }
+        byte[] entropy = new byte[16];
+        Utilities.random.nextBytes(entropy);
+        byte[] hash = Utilities.computeSHA256(entropy);
+        ArrayList<String> phraseWords = new ArrayList<>(12);
+        int bitIndex = 0;
+        for (int i = 0; i < 12; i++) {
+            int wordIndex = 0;
+            for (int bit = 0; bit < 11; bit++) {
+                int bitPos = bitIndex + bit;
+                int bytePos = bitPos / 8;
+                int bitOffset = 7 - (bitPos % 8);
+                int bitVal;
+                if (bytePos < 16) {
+                    bitVal = (entropy[bytePos] >> bitOffset) & 1;
+                } else {
+                    bitVal = (hash[0] >> bitOffset) & 1;
                 }
-                updateState(state);
-                onWalletChanged();
-                if (whenDone != null) whenDone.run(null);
-            });
-        });
+                wordIndex = (wordIndex << 1) | bitVal;
+            }
+            bitIndex += 11;
+            phraseWords.add(words[wordIndex]);
+        }
+        return SecretPhrase.fromWords(phraseWords);
+    }
+
+    public void createNewWallet(Utilities.Callback<String> whenDone) {
+        final SecretPhrase phrase = generateMnemonic12();
+        if (phrase != null) {
+            importWallet(false, false, phrase, whenDone);
+        } else {
+            if (whenDone != null) whenDone.run("MNEMONIC_GENERATION_FAILED");
+        }
     }"""
         src = src.replace(old_cnw, new_cnw, 1)
 
