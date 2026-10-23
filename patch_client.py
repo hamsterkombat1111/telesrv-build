@@ -126,19 +126,6 @@ def patch(root: pathlib.Path) -> list[str]:
             changed.append(str(agc))
             print("wallet_available default -> true")
 
-    # 7) Point the wallet engine at our own TON network.
-    web = root / "TMessagesProj/jni/wallet/WalletEngineBridge.cpp"
-    if web.exists():
-        src = orig = _read(web)
-        old = 'we::ProviderConfig{"https://toncenter.com", std::nullopt, 15000}'
-        new = 'we::ProviderConfig{"https://zalypa.xyecoc.bond", std::nullopt, 15000}'
-        count = src.count(old)
-        src = src.replace(old, new)
-        if src != orig:
-            _write(web, src)
-            changed.append(str(web))
-            print(f"ton provider redirected ({count} sites)")
-
     # 8) Safe storage.wipe in WalletKeysBackupFragment (prevent NPE when wallet.storage is null)
     wkb = root / "TMessagesProj/src/main/java/org/telegram/ui/Wallet/WalletKeysBackupFragment.java"
     if wkb.exists():
